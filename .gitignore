@@ -1,0 +1,12 @@
+# Windows/WSL download metadata, not part of the project
+*:Zone.Identifier
+
+# Game engine + reference robots are provided separately by the school,
+# re-download them instead of vendoring multi-MB binaries into git
+docker_image/linux_game_engine
+docker_image/m1_game_engine
+docker_image/linux_robots/
+docker_image/m1_robots/
+
+# Rust build output
+/docker_image/solution/target/
