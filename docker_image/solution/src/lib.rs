@@ -1,6 +1,10 @@
 //! Core game logic for the filler bot, kept separate from main.rs so it
 //! can be exercised directly by unit tests without going through stdin.
 
+use std::collections::{HashSet, VecDeque};
+
+const NEIGHBORS: [(i64, i64); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
+
 /// Which side of the match we are playing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Player {
@@ -180,6 +184,146 @@ pub fn evaluate_placement(
     }
 }
 
+/// BFS distance, from every cell, to the nearest source cell.
+/// Unreached cells (shouldn't happen on the open Anfield) stay at u32::MAX.
+fn bfs_multi_source(grid: &Grid, sources: &[(usize, usize)]) -> Vec<u32> {
+    let mut dist = vec![u32::MAX; grid.width * grid.height];
+    let mut q = VecDeque::new();
+    for &(x, y) in sources {
+        let idx = y * grid.width + x;
+        if dist[idx] == u32::MAX {
+            dist[idx] = 0;
+            q.push_back((x, y));
+        }
+    }
+    while let Some((x, y)) = q.pop_front() {
+        let d = dist[y * grid.width + x];
+        for (dx, dy) in NEIGHBORS {
+            let nx = x as i64 + dx;
+            let ny = y as i64 + dy;
+            if grid.in_bounds(nx, ny) {
+                let (nx, ny) = (nx as usize, ny as usize);
+                let idx = ny * grid.width + nx;
+                if dist[idx] == u32::MAX {
+                    dist[idx] = d + 1;
+                    q.push_back((nx, ny));
+                }
+            }
+        }
+    }
+    dist
+}
+
+/// Counts how many empty cells are reachable from `start_cells` through
+/// other empty cells, stopping early once `cap` is reached. Used as a
+/// cheap "how much room is actually here" safety check so we don't wander
+/// into a pocket too small to keep growing in.
+fn flood_size(grid: &Grid, start_cells: &[(usize, usize)], cap: usize) -> usize {
+    let mut seen: HashSet<(usize, usize)> = start_cells.iter().copied().collect();
+    let mut q: VecDeque<(usize, usize)> = start_cells.iter().copied().collect();
+    let mut count = 0;
+    while let Some((x, y)) = q.pop_front() {
+        if count >= cap {
+            break;
+        }
+        for (dx, dy) in NEIGHBORS {
+            let nx = x as i64 + dx;
+            let ny = y as i64 + dy;
+            if grid.in_bounds(nx, ny) {
+                let (nx, ny) = (nx as usize, ny as usize);
+                if grid.get(nx, ny) == '.' && seen.insert((nx, ny)) {
+                    count += 1;
+                    if count >= cap {
+                        break;
+                    }
+                    q.push_back((nx, ny));
+                }
+            }
+        }
+    }
+    count
+}
+
+// Below this size the whole Anfield is small enough that growing outward
+// (away from existing territory) tends to fragment us into corners; hugging
+// our own territory instead keeps more options open. Tuned against the
+// reference robots on the 20x15 map.
+const SMALL_BOARD_AREA: usize = 600;
+// Only run the (more expensive) flood-fill safety check on the most
+// promising candidates instead of every legal placement.
+const TOP_CANDIDATES: usize = 30;
+// A candidate needs at least this many times its own area of reachable
+// open space nearby to be considered "safe" rather than a potential
+// dead end.
+const SAFETY_MULTIPLIER: usize = 6;
+
+/// Picks the best legal placement for `piece` on `grid`, or None if no
+/// legal placement exists (caller should then answer "0 0").
+///
+/// Candidates are ranked by distance from existing territory (favoring
+/// wide-open growth on large boards, compact growth on small ones) plus a
+/// bonus for crowding the opponent, then filtered for a minimum amount of
+/// reachable open space so we don't grow into a dead end.
+pub fn best_move(grid: &Grid, piece: &Piece, player: Player) -> Option<(usize, usize)> {
+    if piece.cells.is_empty() {
+        return None;
+    }
+
+    let obstacle_sources: Vec<(usize, usize)> = (0..grid.height)
+        .flat_map(|y| (0..grid.width).map(move |x| (x, y)))
+        .filter(|&(x, y)| grid.get(x, y) != '.')
+        .collect();
+    let dist_wall = bfs_multi_source(grid, &obstacle_sources);
+    let small_board = grid.width * grid.height < SMALL_BOARD_AREA;
+
+    let mut candidates: Vec<(i64, Placement)> = Vec::new();
+    for oy in 0..grid.height {
+        for ox in 0..grid.width {
+            let placement = match evaluate_placement(grid, piece, ox, oy, player) {
+                Some(p) => p,
+                None => continue,
+            };
+
+            let wall_sum: i64 = placement
+                .cells
+                .iter()
+                .map(|&(gx, gy)| dist_wall[gy * grid.width + gx] as i64)
+                .sum();
+            let wall_term = if small_board { -wall_sum } else { wall_sum };
+
+            let mut opp_adj = 0i64;
+            for &(gx, gy) in &placement.cells {
+                for (dx, dy) in NEIGHBORS {
+                    let nx = gx as i64 + dx;
+                    let ny = gy as i64 + dy;
+                    if grid.in_bounds(nx, ny) && player.is_opp(grid.get(nx as usize, ny as usize)) {
+                        opp_adj += 1;
+                    }
+                }
+            }
+
+            let score = wall_term + opp_adj * 6;
+            candidates.push((score, placement));
+        }
+    }
+
+    if candidates.is_empty() {
+        return None;
+    }
+
+    candidates.sort_by(|a, b| b.0.cmp(&a.0));
+    candidates.truncate(TOP_CANDIDATES);
+
+    let safe_threshold = piece.area() * SAFETY_MULTIPLIER;
+    let fallback = (candidates[0].1.x, candidates[0].1.y);
+    for (_, placement) in &candidates {
+        if flood_size(grid, &placement.cells, safe_threshold + 1) >= safe_threshold {
+            return Some((placement.x, placement.y));
+        }
+    }
+    Some(fallback)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -319,5 +463,29 @@ mod tests {
         // ox=0 is the smallest legal origin; confirms the search space
         // starts at the edge itself rather than needing to go negative.
         assert!(evaluate_placement(&grid, &piece, 0, 0, Player::One).is_some());
+    }
+
+    // --- Move selection --------------------------------------------------
+
+    #[test]
+    fn best_move_never_returns_out_of_bounds_coordinates() {
+        let grid = Grid::from_rows(6, 6, &rows(&[
+            "......", "......", "......", "...@..", "......", "......",
+        ]));
+        let piece = Piece::from_rows(3, 3, &rows(&["###", "###", "###"]));
+        let (x, y) = best_move(&grid, &piece, Player::One).expect("a legal placement exists");
+        for &(px, py) in &piece.cells {
+            assert!(grid.in_bounds((x + px) as i64, (y + py) as i64));
+        }
+    }
+
+    #[test]
+    fn best_move_returns_none_when_no_legal_placement_exists() {
+        // A 1-cell piece could trivially "overlap" any of our own already
+        // occupied cells, so use a 2-cell piece: with the board fully
+        // occupied there's nowhere for its second cell to land.
+        let grid = Grid::from_rows(2, 2, &rows(&["@@", "@@"]));
+        let piece = Piece::from_rows(2, 1, &rows(&["##"]));
+        assert_eq!(best_move(&grid, &piece, Player::One), None);
     }
 }
