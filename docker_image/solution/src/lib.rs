@@ -135,6 +135,51 @@ pub fn row_content(line: &str) -> &str {
     }
 }
 
+/// A piece placement that has already been checked against the board:
+/// its bounding-box origin plus the absolute cells it would occupy.
+#[derive(Debug, Clone)]
+pub struct Placement {
+    pub x: usize,
+    pub y: usize,
+    pub cells: Vec<(usize, usize)>,
+}
+
+/// Checks whether `piece` can legally be placed with its bounding-box
+/// origin at (ox, oy): every occupied cell must land inside the grid,
+/// exactly one must overlap our own territory, and none may overlap the
+/// opponent's.
+pub fn evaluate_placement(
+    grid: &Grid,
+    piece: &Piece,
+    ox: usize,
+    oy: usize,
+    player: Player,
+) -> Option<Placement> {
+    let mut overlap_mine = 0u32;
+    let mut overlap_opp = 0u32;
+    let mut cells = Vec::with_capacity(piece.cells.len());
+    for &(px, py) in &piece.cells {
+        let gx = ox as i64 + px as i64;
+        let gy = oy as i64 + py as i64;
+        if !grid.in_bounds(gx, gy) {
+            return None;
+        }
+        let (gx, gy) = (gx as usize, gy as usize);
+        let c = grid.get(gx, gy);
+        if player.is_own(c) {
+            overlap_mine += 1;
+        } else if player.is_opp(c) {
+            overlap_opp += 1;
+        }
+        cells.push((gx, gy));
+    }
+    if overlap_mine == 1 && overlap_opp == 0 {
+        Some(Placement { x: ox, y: oy, cells })
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -203,5 +248,76 @@ mod tests {
         // below the only occupied row.
         let piece = Piece::from_rows(4, 6, &rows(&["OO..", "....", "....", "....", "....", "...."]));
         assert_eq!(piece.cells, vec![(0, 0), (1, 0)]);
+    }
+
+    // --- Placement validation -----------------------------------------
+
+    #[test]
+    fn placement_accepted_with_exactly_one_overlap() {
+        let grid = Grid::from_rows(5, 5, &rows(&[".....", ".....", "..@..", ".....", "....."]));
+        let piece = Piece::from_rows(2, 1, &rows(&["##"]));
+        // Origin (1,2): cells (1,2) empty, (2,2) is '@' -> one overlap.
+        let placement = evaluate_placement(&grid, &piece, 1, 2, Player::One);
+        assert!(placement.is_some());
+        assert_eq!(placement.unwrap().cells, vec![(1, 2), (2, 2)]);
+    }
+
+    #[test]
+    fn placement_rejected_with_zero_overlap() {
+        let grid = Grid::from_rows(5, 5, &rows(&[".....", ".....", "..@..", ".....", "....."]));
+        let piece = Piece::from_rows(2, 1, &rows(&["##"]));
+        // Origin (0,0): neither cell touches the existing '@'.
+        assert!(evaluate_placement(&grid, &piece, 0, 0, Player::One).is_none());
+    }
+
+    #[test]
+    fn placement_rejected_with_two_overlaps_on_own_territory() {
+        let grid = Grid::from_rows(5, 5, &rows(&[".....", ".....", ".@@..", ".....", "....."]));
+        let piece = Piece::from_rows(2, 1, &rows(&["##"]));
+        // Both piece cells land on our own territory.
+        assert!(evaluate_placement(&grid, &piece, 1, 2, Player::One).is_none());
+    }
+
+    #[test]
+    fn placement_rejected_when_touching_opponent_territory() {
+        let grid = Grid::from_rows(5, 5, &rows(&[".....", ".....", ".@s..", ".....", "....."]));
+        let piece = Piece::from_rows(2, 1, &rows(&["##"]));
+        // One cell overlaps our own '@', the other overlaps opponent 's'.
+        assert!(evaluate_placement(&grid, &piece, 1, 2, Player::One).is_none());
+    }
+
+    #[test]
+    fn placement_treats_last_placed_and_settled_symbols_as_same_owner() {
+        // Lowercase 'a' (last placed) and '@' (settled) are both player 1.
+        let grid = Grid::from_rows(5, 5, &rows(&[".....", ".....", "..a..", ".....", "....."]));
+        let piece = Piece::from_rows(2, 1, &rows(&["##"]));
+        assert!(evaluate_placement(&grid, &piece, 1, 2, Player::One).is_some());
+    }
+
+    // --- Boundary conditions -------------------------------------------
+
+    #[test]
+    fn placement_rejected_past_right_edge() {
+        let grid = Grid::from_rows(5, 5, &rows(&[".....", ".....", "....@", ".....", "....."]));
+        let piece = Piece::from_rows(2, 1, &rows(&["##"]));
+        // Origin x=4 pushes the second cell to x=5, outside a width-5 grid.
+        assert!(evaluate_placement(&grid, &piece, 4, 2, Player::One).is_none());
+    }
+
+    #[test]
+    fn placement_rejected_past_bottom_edge() {
+        let grid = Grid::from_rows(5, 5, &rows(&[".....", ".....", ".....", ".....", "....@"]));
+        let piece = Piece::from_rows(1, 2, &rows(&["#", "#"]));
+        // Origin y=4 pushes the second cell to y=5, outside a height-5 grid.
+        assert!(evaluate_placement(&grid, &piece, 4, 4, Player::One).is_none());
+    }
+
+    #[test]
+    fn placement_accepted_when_anchored_at_the_very_edge() {
+        let grid = Grid::from_rows(5, 5, &rows(&["@....", ".....", ".....", ".....", "....."]));
+        let piece = Piece::from_rows(2, 1, &rows(&["##"]));
+        // ox=0 is the smallest legal origin; confirms the search space
+        // starts at the edge itself rather than needing to go negative.
+        assert!(evaluate_placement(&grid, &piece, 0, 0, Player::One).is_some());
     }
 }
