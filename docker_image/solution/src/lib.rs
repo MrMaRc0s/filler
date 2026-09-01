@@ -139,6 +139,12 @@ pub fn row_content(line: &str) -> &str {
     }
 }
 
+/// Formats a chosen coordinate as the exact "X Y\n" line the game_engine
+/// expects on stdout.
+pub fn format_answer(x: usize, y: usize) -> String {
+    format!("{} {}\n", x, y)
+}
+
 /// A piece placement that has already been checked against the board:
 /// its bounding-box origin plus the absolute cells it would occupy.
 #[derive(Debug, Clone)]
@@ -487,5 +493,13 @@ mod tests {
         let grid = Grid::from_rows(2, 2, &rows(&["@@", "@@"]));
         let piece = Piece::from_rows(2, 1, &rows(&["##"]));
         assert_eq!(best_move(&grid, &piece, Player::One), None);
+    }
+
+    // --- Coordinate output -------------------------------------------
+
+    #[test]
+    fn format_answer_matches_required_wire_format() {
+        assert_eq!(format_answer(7, 2), "7 2\n");
+        assert_eq!(format_answer(0, 0), "0 0\n");
     }
 }
